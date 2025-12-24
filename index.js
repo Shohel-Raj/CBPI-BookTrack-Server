@@ -18,14 +18,13 @@ admin.initializeApp({
 
 app.use(
   cors({
-    origin: ["http://localhost:5173",],
+    origin: ["http://localhost:5173"],
     credentials: true,
   })
 );
 
 app.use(express.json());
 // const uri= `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASSWORD}@cluster0.pcdcucf.mongodb.net/?appName=Cluster0`
-
 
 const client = new MongoClient(process.env.DB_URI, {
   serverApi: {
@@ -61,7 +60,8 @@ async function run() {
 
     const database = client.db("LibraryManagement");
     const UserCollection = database.collection("UserCollection");
-
+    const BookCollection = database.collection("BookCollection");
+    const BorrowCollection = database.collection("BorrowCollection");
 
     app.get("/", (req, res) => {
       res.send(" CPBI library Management server is coocking.............");
@@ -139,9 +139,371 @@ async function run() {
       }
     });
 
-  
+    // books collections
 
+    app.post("/books", verifyToken, async (req, res) => {
+      try {
+        const {
+          title,
+          coverPage,
+          description,
+          author,
+          category,
+          language,
+          totalCopies,
+          shelfNo,
+        } = req.body;
 
+        if (!title || !author || !totalCopies) {
+          return res.status(400).send({ message: "Required fields missing" });
+        }
+
+        const newBook = {
+          title,
+          coverPage,
+          description,
+          author,
+          category,
+          language,
+          totalCopies: Number(totalCopies),
+          availableCopies: Number(totalCopies),
+          shelfNo,
+          status: "available",
+          createdAt: new Date(),
+        };
+
+        await BookCollection.insertOne(newBook);
+
+        res.status(201).send({
+          success: true,
+          message: "Book added successfully",
+        });
+      } catch (error) {
+        res.status(500).send({
+          success: false,
+          message: "Failed to add book",
+        });
+      }
+    });
+    app.get("/books/:id", async (req, res) => {
+      try {
+        const book = await BookCollection.findOne({
+          _id: new ObjectId(req.params.id),
+        });
+
+        if (!book) return res.status(404).send({ message: "Book not found" });
+
+        res.send(book);
+      } catch {
+        res.status(500).send({ message: "Failed to fetch book" });
+      }
+    });
+
+    app.get("/books", async (req, res) => {
+      try {
+        const {
+          page = 1,
+          pageSize = 8,
+          search = "",
+          category = "",
+          availability = "",
+          sort = "",
+        } = req.query;
+
+        /* ---------- Pagination ---------- */
+        const currentPage = parseInt(page);
+        const limit = parseInt(pageSize);
+        const skip = (currentPage - 1) * limit;
+
+        /* ---------- Filters ---------- */
+        const query = {};
+
+        // 🔍 Search (title or author)
+        if (search) {
+          query.$or = [
+            { title: { $regex: search, $options: "i" } },
+            { author: { $regex: search, $options: "i" } },
+          ];
+        }
+
+        // 📚 Category
+        if (category) {
+          query.category = category;
+        }
+
+        // ✅ Availability
+        if (availability) {
+          query.availability = availability;
+        }
+
+        /* ---------- Sorting ---------- */
+        let sortOption = {};
+        if (sort === "newest") sortOption = { createdAt: -1 };
+        if (sort === "popular") sortOption = { borrowCount: -1 };
+
+        /* ---------- Fetch ---------- */
+        const books = await BookCollection.find(query)
+          .sort(sortOption)
+          .skip(skip)
+          .limit(limit)
+          .toArray();
+
+        const totalBooks = await BookCollection.countDocuments(query);
+        const totalPages = Math.ceil(totalBooks / limit);
+
+        /* ---------- Response ---------- */
+        res.status(200).send({
+          books,
+          totalPages,
+        });
+      } catch (error) {
+        res.status(500).send({
+          books: [],
+          totalPages: 0,
+        });
+      }
+    });
+    app.put("/books/:id", verifyToken, async (req, res) => {
+      try {
+        const updateData = req.body;
+
+        const result = await BookCollection.updateOne(
+          { _id: new ObjectId(req.params.id) },
+          {
+            $set: {
+              ...updateData,
+              updatedAt: new Date(),
+            },
+          }
+        );
+
+        if (result.matchedCount === 0)
+          return res.status(404).send({ message: "Book not found" });
+
+        res.send({
+          success: true,
+          message: "Book updated successfully",
+        });
+      } catch {
+        res.status(500).send({
+          success: false,
+          message: "Failed to update book",
+        });
+      }
+    });
+
+    app.delete("/books/:id", verifyToken, async (req, res) => {
+      try {
+        const result = await BookCollection.deleteOne({
+          _id: new ObjectId(req.params.id),
+        });
+
+        if (result.deletedCount === 0)
+          return res.status(404).send({ message: "Book not found" });
+
+        res.send({
+          success: true,
+          message: "Book deleted successfully",
+        });
+      } catch {
+        res.status(500).send({
+          success: false,
+          message: "Failed to delete book",
+        });
+      }
+    });
+
+    // borrow and return
+    app.post("/books/borrow/:id", verifyToken, async (req, res) => {
+      try {
+        const bookId = new ObjectId(req.params.id);
+        const { email: userEmail, role } = req.user;
+
+        /* -------- Borrow Limit by Role -------- */
+        const borrowLimits = {
+          member: 3,
+          teacher: 5,
+          admin: Infinity,
+        };
+
+        const maxAllowed = borrowLimits[role] ?? 3;
+
+        // Count active borrows
+        const activeBorrows = await BorrowCollection.countDocuments({
+          userEmail,
+          status: "borrowed",
+        });
+
+        if (activeBorrows >= maxAllowed) {
+          return res.status(403).send({
+            success: false,
+            message: `Borrow limit reached (${maxAllowed} books)`,
+          });
+        }
+
+        /* -------- Check Book -------- */
+        const book = await BookCollection.findOne({ _id: bookId });
+
+        if (!book) {
+          return res.status(404).send({ message: "Book not found" });
+        }
+
+        if (book.availableCopies <= 0) {
+          return res.status(400).send({ message: "No copies available" });
+        }
+
+        /* -------- Prevent Double Borrow -------- */
+        const alreadyBorrowed = await BorrowCollection.findOne({
+          bookId,
+          userEmail,
+          status: "borrowed",
+        });
+
+        if (alreadyBorrowed) {
+          return res.status(400).send({
+            message: "You already borrowed this book",
+          });
+        }
+
+        /* -------- Borrow Book -------- */
+        await BorrowCollection.insertOne({
+          bookId,
+          userEmail,
+          borrowDate: new Date(),
+          returnDate: null,
+          status: "borrowed",
+        });
+
+        const updatedAvailable = book.availableCopies - 1;
+
+        await BookCollection.updateOne(
+          { _id: bookId },
+          {
+            $set: {
+              availableCopies: updatedAvailable,
+              status: updatedAvailable === 0 ? "unavailable" : "available",
+            },
+          }
+        );
+
+        res.send({
+          success: true,
+          message: "Book borrowed successfully",
+        });
+      } catch (error) {
+        res.status(500).send({
+          success: false,
+          message: "Borrow failed",
+        });
+      }
+    });
+
+    app.post("/books/return/:id", verifyToken, async (req, res) => {
+      try {
+        const bookId = new ObjectId(req.params.id);
+        const userEmail = req.user.email;
+
+        // 🔎 Find borrow record
+        const borrowRecord = await BorrowCollection.findOne({
+          bookId,
+          userEmail,
+          status: "borrowed",
+        });
+
+        if (!borrowRecord) {
+          return res.status(400).send({
+            message: "You did not borrow this book",
+          });
+        }
+
+        // 🔁 Update borrow record
+        await BorrowCollection.updateOne(
+          { _id: borrowRecord._id },
+          {
+            $set: {
+              status: "returned",
+              returnDate: new Date(),
+            },
+          }
+        );
+
+        // 📈 Update book
+        const book = await BookCollection.findOne({ _id: bookId });
+        const updatedAvailable = book.availableCopies + 1;
+
+        await BookCollection.updateOne(
+          { _id: bookId },
+          {
+            $set: {
+              availableCopies: updatedAvailable,
+              status: "available",
+            },
+          }
+        );
+
+        res.send({
+          success: true,
+          message: "Book returned successfully",
+        });
+      } catch (error) {
+        res.status(500).send({
+          success: false,
+          message: "Return failed",
+        });
+      }
+    });
+
+    app.get("/my-borrowed-books", verifyToken, async (req, res) => {
+      try {
+        const userEmail = req.user.email;
+
+        const borrowedBooks = await BorrowCollection.aggregate([
+          {
+            $match: {
+              userEmail,
+              status: "borrowed",
+            },
+          },
+          {
+            $lookup: {
+              from: "BookCollection",
+              localField: "bookId",
+              foreignField: "_id",
+              as: "book",
+            },
+          },
+          { $unwind: "$book" },
+        ]).toArray();
+
+        res.send(borrowedBooks);
+      } catch {
+        res.status(500).send({ message: "Failed to fetch borrowed books" });
+      }
+    });
+
+    app.get("/borrow-history", verifyToken, async (req, res) => {
+      try {
+        const userEmail = req.user.email;
+
+        const history = await BorrowCollection.aggregate([
+          { $match: { userEmail } },
+          {
+            $lookup: {
+              from: "BookCollection",
+              localField: "bookId",
+              foreignField: "_id",
+              as: "book",
+            },
+          },
+          { $unwind: "$book" },
+          { $sort: { borrowDate: -1 } },
+        ]).toArray();
+
+        res.send(history);
+      } catch {
+        res.status(500).send({ message: "Failed to load history" });
+      }
+    });
 
     await client.db("admin").command({ ping: 1 });
     console.log(
