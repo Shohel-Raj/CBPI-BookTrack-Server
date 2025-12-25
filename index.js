@@ -139,36 +139,152 @@ async function run() {
       }
     });
 
+    // GET /users?page=1&role=admin&status=active&search=john
+    app.get("/users", verifyToken, async (req, res) => {
+      try {
+        const { page = 1, role, status, search } = req.query;
+        const limit = 10; // items per page
+        const skip = (page - 1) * limit;
+
+        // Build query object
+        const query = {};
+
+        if (role) query.role = role;
+        if (status) query.status = status;
+        if (search) {
+          query.$or = [
+            { name: { $regex: search, $options: "i" } },
+            { email: { $regex: search, $options: "i" } },
+          ];
+        }
+
+        // Get total count
+        const totalUsers = await UserCollection.countDocuments(query);
+
+        // Fetch users with pagination
+        const users = await UserCollection.find(query)
+          .skip(skip)
+          .limit(limit)
+          .toArray();
+
+        const totalPages = Math.ceil(totalUsers / limit);
+
+        res.send({
+          success: true,
+          users,
+          totalPages,
+          page: Number(page),
+          totalUsers,
+        });
+      } catch (error) {
+        res.status(500).send({ success: false, message: error.message });
+      }
+    });
+    // DELETE /users/:id
+    app.delete("/users/:id", verifyToken, async (req, res) => {
+      try {
+        const { id } = req.params;
+
+        // Optional: Prevent admin from deleting themselves
+        const requestingUserEmail = req.user.email;
+        const requestingUser = await UserCollection.findOne({
+          email: requestingUserEmail,
+        });
+        if (requestingUser.role === "admin") {
+          const userToDelete = await UserCollection.findOne({
+            _id: new ObjectId(id),
+          });
+          if (userToDelete.email === requestingUserEmail) {
+            return res.status(400).send({
+              success: false,
+              message: "Admin cannot delete their own account",
+            });
+          }
+        }
+
+        const result = await UserCollection.deleteOne({
+          _id: new ObjectId(id),
+        });
+
+        if (result.deletedCount === 0) {
+          return res
+            .status(404)
+            .send({ success: false, message: "User not found" });
+        }
+
+        res.send({ success: true, message: "User deleted successfully" });
+      } catch (error) {
+        res.status(500).send({ success: false, message: error.message });
+      }
+    });
+    // PATCH /users/:id/status
+    app.patch("/users/:id/status", verifyToken, async (req, res) => {
+      try {
+        const { id } = req.params;
+
+        // Find the user
+        const user = await UserCollection.findOne({ _id: new ObjectId(id) });
+        if (!user) {
+          return res
+            .status(404)
+            .send({ success: false, message: "User not found" });
+        }
+
+        // Toggle status
+        const newStatus = user.status === "active" ? "pending" : "active";
+
+        const result = await UserCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { status: newStatus } }
+        );
+
+        res.send({
+          success: true,
+          message: `User status updated to ${newStatus}`,
+          status: newStatus,
+        });
+      } catch (error) {
+        res.status(500).send({ success: false, message: error.message });
+      }
+    });
+
     // books collections
 
     app.post("/books", verifyToken, async (req, res) => {
       try {
         const {
           title,
-          coverPage,
+          coverImage, // renamed from coverPage
           description,
-          author,
+          authors, // now an array of authors
           category,
           language,
           totalCopies,
           shelfNo,
         } = req.body;
 
-        if (!title || !author || !totalCopies) {
+        // Validate required fields
+        if (
+          !title ||
+          !authors ||
+          !Array.isArray(authors) ||
+          authors.length === 0 ||
+          !totalCopies
+        ) {
           return res.status(400).send({ message: "Required fields missing" });
         }
 
         const newBook = {
           title,
-          coverPage,
+          coverPage: coverImage, // store under coverPage field in DB
           description,
-          author,
+          author: authors, // store as array
           category,
           language,
           totalCopies: Number(totalCopies),
           availableCopies: Number(totalCopies),
           shelfNo,
-          status: "available",
+          status: Number(totalCopies) > 0 ? "available" : "unavailable",
           createdAt: new Date(),
         };
 
@@ -179,12 +295,14 @@ async function run() {
           message: "Book added successfully",
         });
       } catch (error) {
+        console.error(error);
         res.status(500).send({
           success: false,
           message: "Failed to add book",
         });
       }
     });
+
     app.get("/books/:id", async (req, res) => {
       try {
         const book = await BookCollection.findOne({
@@ -222,18 +340,18 @@ async function run() {
         if (search) {
           query.$or = [
             { title: { $regex: search, $options: "i" } },
-            { author: { $regex: search, $options: "i" } },
+            { author: { $elemMatch: { $regex: search, $options: "i" } } },
           ];
         }
 
         // 📚 Category
         if (category) {
-          query.category = category;
+          query.category = { $regex: `^${category}$`, $options: "i" };
         }
 
         // ✅ Availability
         if (availability) {
-          query.availability = availability;
+          query.status = { $regex: `^${availability}$`, $options: "i" };
         }
 
         /* ---------- Sorting ---------- */
