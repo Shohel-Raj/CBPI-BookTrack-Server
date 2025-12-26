@@ -250,42 +250,41 @@ async function run() {
 
     // books collections
 
+    // GET /books/categories - Get all available book categories
+    app.get("/books/categories", async (req, res) => {
+      try {
+        // Fetch only available books based on 'status'
+        const availableBooks = await BookCollection.find({
+          status: "available",
+        }).toArray();
 
-// GET /books/categories - Get all available book categories
-app.get("/books/categories", async (req, res) => {
-  try {
-    // Fetch only available books based on 'status'
-    const availableBooks = await BookCollection.find({ status: "available" }).toArray();
+        if (!Array.isArray(availableBooks)) {
+          return res.status(500).send({
+            success: false,
+            message: "Data format error",
+          });
+        }
 
-    if (!Array.isArray(availableBooks)) {
-      return res.status(500).send({
-        success: false,
-        message: "Data format error",
-      });
-    }
+        // Extract unique categories, filter out empty/null
+        const categories = [
+          ...new Set(
+            availableBooks
+              .map((book) => book.category)
+              .filter((cat) => cat && cat.trim() !== "")
+          ),
+        ];
 
-    // Extract unique categories, filter out empty/null
-    const categories = [
-      ...new Set(
-        availableBooks
-          .map((book) => book.category)
-          .filter((cat) => cat && cat.trim() !== "")
-      ),
-    ];
-
-    res.status(200).send({
-      success: true,
-      categories,
+        res.status(200).send({
+          success: true,
+          categories,
+        });
+      } catch (error) {
+        res.status(500).send({
+          success: false,
+          message: error.message,
+        });
+      }
     });
-  } catch (error) {
-    res.status(500).send({
-      success: false,
-      message: error.message,
-    });
-  }
-});
-
-
 
     app.post("/books", verifyToken, async (req, res) => {
       try {
@@ -471,104 +470,102 @@ app.get("/books/categories", async (req, res) => {
 
     //=========================== borrow and return =========================
 
-
-
     app.post("/books/borrow/:id", verifyToken, async (req, res) => {
-  try {
-    const bookId = new ObjectId(req.params.id);
-    const { email: userEmail, role } = req.user;
+      try {
+        const bookId = new ObjectId(req.params.id);
+        const { email: userEmail, role } = req.user;
 
-    /* -------- Borrow Limit by Role -------- */
-    const borrowLimits = {
-      member: 3,
-      teacher: 5,
-      admin: Infinity,
-    };
-    const borrowDays = {
-      member: 7,
-      teacher: 15,
-      admin: 30,
-    };
+        /* -------- Borrow Limit by Role -------- */
+        const borrowLimits = {
+          member: 3,
+          teacher: 5,
+          admin: Infinity,
+        };
+        const borrowDays = {
+          member: 7,
+          teacher: 15,
+          admin: 30,
+        };
 
-    const maxAllowed = borrowLimits[role] ?? 3;
-    const allowedDays = borrowDays[role] ?? 14;
+        const maxAllowed = borrowLimits[role] ?? 3;
+        const allowedDays = borrowDays[role] ?? 14;
 
-    // Count active borrows
-    const activeBorrows = await BorrowCollection.countDocuments({
-      userEmail,
-      status: "borrowed",
-    });
+        // Count active borrows
+        const activeBorrows = await BorrowCollection.countDocuments({
+          userEmail,
+          status: "borrowed",
+        });
 
-    if (activeBorrows >= maxAllowed) {
-      return res.status(403).send({
-        success: false,
-        message: `Borrow limit reached (${maxAllowed} books)`,
-      });
-    }
+        if (activeBorrows >= maxAllowed) {
+          return res.status(403).send({
+            success: false,
+            message: `Borrow limit reached (${maxAllowed} books)`,
+          });
+        }
 
-    /* -------- Check Book -------- */
-    const book = await BookCollection.findOne({ _id: bookId });
-    if (!book) {
-      return res.status(404).send({ message: "Book not found" });
-    }
-    if (book.availableCopies <= 0) {
-      return res.status(400).send({ message: "No copies available" });
-    }
+        /* -------- Check Book -------- */
+        const book = await BookCollection.findOne({ _id: bookId });
+        if (!book) {
+          return res.status(404).send({ message: "Book not found" });
+        }
+        if (book.availableCopies <= 0) {
+          return res.status(400).send({ message: "No copies available" });
+        }
 
-    /* -------- Prevent Double Borrow -------- */
-    const alreadyBorrowed = await BorrowCollection.findOne({
-      bookId,
-      userEmail,
-      status: "borrowed",
-    });
-    if (alreadyBorrowed) {
-      return res.status(400).send({
-        message: "You already borrowed this book",
-      });
-    }
+        /* -------- Prevent Double Borrow -------- */
+        const alreadyBorrowed = await BorrowCollection.findOne({
+          bookId,
+          userEmail,
+          status: "borrowed",
+        });
+        if (alreadyBorrowed) {
+          return res.status(400).send({
+            message: "You already borrowed this book",
+          });
+        }
 
-    /* -------- Calculate Return Date -------- */
-    const borrowDate = new Date();
-    const returnDate = new Date();
-    returnDate.setDate(borrowDate.getDate() + allowedDays);
+        /* -------- Calculate Return Date -------- */
+        const borrowDate = new Date();
+        const returnDate = new Date();
+        returnDate.setDate(borrowDate.getDate() + allowedDays);
 
-    /* -------- Borrow Book -------- */
-    await BorrowCollection.insertOne({
-      bookId,
-      userEmail,
-      borrowDate,
-      returnDate,
-      status: "borrowed",
-    });
+        /* -------- Borrow Book -------- */
+        await BorrowCollection.insertOne({
+          bookId,
+          userEmail,
+          borrowDate,
+          returnDate,
+          status: "borrowed",
+        });
 
-    const updatedAvailable = book.availableCopies - 1;
+        const updatedAvailable = book.availableCopies - 1;
 
-    await BookCollection.updateOne(
-      { _id: bookId },
-      {
-        $set: {
-          availableCopies: updatedAvailable,
-          status: updatedAvailable === 0 ? "unavailable" : "available",
-        },
+        await BookCollection.updateOne(
+          { _id: bookId },
+          {
+            $set: {
+              availableCopies: updatedAvailable,
+              status: updatedAvailable === 0 ? "unavailable" : "available",
+            },
+          }
+        );
+
+        res.send({
+          success: true,
+          message: "Book borrowed successfully",
+          data: {
+            borrowDate,
+            returnDate,
+          },
+        });
+      } catch (error) {
+        console.error(error);
+        res.status(500).send({
+          success: false,
+          message: "Borrow failed",
+        });
       }
-    );
-
-    res.send({
-      success: true,
-      message: "Book borrowed successfully",
-      data: {
-        borrowDate,
-        returnDate,
-      },
     });
-  } catch (error) {
-    console.error(error);
-    res.status(500).send({
-      success: false,
-      message: "Borrow failed",
-    });
-  }
-});
 
     app.post("/books/return/:id", verifyToken, async (req, res) => {
       try {
@@ -677,10 +674,339 @@ app.get("/books/categories", async (req, res) => {
       }
     });
 
+    // =========================== DASHBOARD STATS ===========================
+
+    const getPastDate = (days) => {
+      if (days < 1) return new Date(); // safety
+
+      const date = new Date();
+      date.setUTCHours(0, 0, 0, 0);
+      date.setUTCDate(date.getUTCDate() - (days - 1));
+      return date;
+    };
+
+
+    // 1. Member Dashboard - Personal borrow history (last 30 days)
+    app.get("/dashboard/member", verifyToken, async (req, res) => {
+      try {
+        const userEmail = req.user.email;
+        const role = req.user.role || "member";
+
+        if (!["member", "teacher"].includes(role)) {
+          return res.status(403).send({ message: "Access denied" });
+        }
+
+        const startDate = getPastDate(30); // last 30 days
+
+        const borrowData = await BorrowCollection.aggregate([
+          {
+            $match: {
+              userEmail,
+              borrowDate: { $gte: startDate },
+            },
+          },
+          {
+            $group: {
+              _id: {
+                $dateToString: { format: "%Y-%m-%d", date: "$borrowDate" },
+              },
+              borrowed: { $sum: 1 },
+              returned: {
+                $sum: {
+                  $cond: [{ $eq: ["$status", "returned"] }, 1, 0],
+                },
+              },
+            },
+          },
+          { $sort: { _id: 1 } },
+        ]).toArray();
+
+        // Fill missing dates with 0
+        const labels = [];
+        const borrowed = [];
+        const returned = [];
+
+        for (
+          let d = new Date(startDate);
+          d <= new Date();
+          d.setDate(d.getDate() + 1)
+        ) {
+          const dateStr = d.toISOString().slice(0, 10);
+          labels.push(dateStr);
+
+          const dayData = borrowData.find((item) => item._id === dateStr) || {
+            borrowed: 0,
+            returned: 0,
+          };
+          borrowed.push(dayData.borrowed);
+          returned.push(dayData.returned);
+        }
+
+        res.send({
+          success: true,
+          chartData: {
+            labels,
+            datasets: [
+              {
+                label: "Books Borrowed",
+                data: borrowed,
+                borderColor: "rgb(59, 130, 246)",
+                backgroundColor: "rgba(59, 130, 246, 0.1)",
+                tension: 0.3,
+              },
+              {
+                label: "Books Returned",
+                data: returned,
+                borderColor: "rgb(34, 197, 94)",
+                backgroundColor: "rgba(34, 197, 94, 0.1)",
+                tension: 0.3,
+              },
+            ],
+          },
+          summary: {
+            totalBorrowedLast30Days: borrowed.reduce((a, b) => a + b, 0),
+            totalReturnedLast30Days: returned.reduce((a, b) => a + b, 0),
+          },
+        });
+      } catch (error) {
+        console.error(error);
+        res.status(500).send({ message: "Failed to load member dashboard" });
+      }
+    });
+
+    app.get("/dashboard/teacher", verifyToken, async (req, res) => {
+      try {
+        const userEmail = req.user.email;
+        if (!userEmail)
+          return res.status(401).send({ message: "Unauthorized" });
+
+        const userDoc = await UserCollection.findOne({ email: userEmail });
+        if (!userDoc || userDoc.role !== "teacher") {
+          return res.status(403).send({ message: "Access denied" });
+        }
+
+        const today = new Date();
+        const startDate15 = getPastDate(15); // Last 15 days including today
+
+        // === Safe parsing of borrowDate (handles string or Date) ===
+        const parseDateExpr = {
+          $cond: [
+            { $eq: [{ $type: "$borrowDate" }, "string"] },
+            { $dateFromString: { dateString: "$borrowDate" } },
+            "$borrowDate",
+          ],
+        };
+
+        // Daily borrow counts for last 15 days
+        const dailyBorrows = await BorrowCollection.aggregate([
+          { $match: { userEmail } },
+          {
+            $addFields: {
+              parsedDate: parseDateExpr,
+            },
+          },
+          { $match: { parsedDate: { $gte: startDate15 } } },
+          {
+            $group: {
+              _id: {
+                $dateToString: {
+                  format: "%Y-%m-%d",
+                  date: "$parsedDate",
+                  timezone: "UTC",
+                },
+              },
+              count: { $sum: 1 },
+            },
+          },
+          { $sort: { _id: 1 } },
+        ]).toArray();
+
+        // Build last 15 days labels + data
+        const labels = [];
+        const data = [];
+        let current = new Date(startDate15);
+        while (current <= today) {
+          const dateStr = current.toISOString().slice(0, 10);
+          labels.push(dateStr);
+          const day = dailyBorrows.find((d) => d._id === dateStr);
+          data.push(day ? day.count : 0);
+          current.setUTCDate(current.getUTCDate() + 1);
+        }
+
+        // Total ever borrowed
+        const totalRecordsFound = await BorrowCollection.countDocuments({
+          userEmail,
+        });
+
+        // Currently borrowed
+        const currentlyBorrowed = await BorrowCollection.countDocuments({
+          userEmail,
+          status: { $ne: "returned" },
+        });
+
+        // Total returned
+        const totalReturned = await BorrowCollection.countDocuments({
+          userEmail,
+          status: "returned",
+        });
+
+        // Average reading time (in days) for returned books
+        let avgReadingDays = 0;
+        if (totalReturned > 0) {
+          const returnedBooks = await BorrowCollection.find({
+            userEmail,
+            status: "returned",
+            returnDate: { $exists: true },
+          }).toArray();
+
+          const totalDays = returnedBooks.reduce((sum, book) => {
+            const borrow = new Date(
+              typeof book.borrowDate === "string"
+                ? book.borrowDate
+                : book.borrowDate
+            );
+            const returnD = new Date(book.returnDate);
+            const days = (returnD - borrow) / (1000 * 60 * 60 * 24);
+            return sum + days;
+          }, 0);
+
+          avgReadingDays = Math.round(totalDays / totalReturned);
+        }
+
+        res.send({
+          success: true,
+          user: { name: userDoc.name || "Teacher", email: userEmail },
+          chartData: {
+            labels,
+            datasets: [
+              {
+                label: "Books Borrowed",
+                data,
+                borderColor: "rgb(147, 51, 234)",
+                backgroundColor: "rgba(147, 51, 234, 0.1)",
+                tension: 0.4,
+                fill: true,
+              },
+            ],
+          },
+          summary: {
+            totalRecordsFound,
+            currentlyBorrowed,
+            totalReturned,
+            avgReadingDays,
+          },
+        });
+      } catch (error) {
+        console.error("Teacher Dashboard Error:", error);
+        res.status(500).send({ message: "Failed to load dashboard" });
+      }
+    });
+    // 3. Admin Dashboard - Library-wide stats (last 6 months)
+    app.get("/dashboard/admin", verifyToken, async (req, res) => {
+      try {
+        const userEmail = req.user.email;
+        if (!userEmail)
+          return res.status(401).send({ message: "Unauthorized" });
+
+        const userDoc = await UserCollection.findOne({ email: userEmail });
+        const role =userDoc?.role;
+        if (!userDoc || userDoc.role !== "admin") {
+          return res.status(403).send({ message: "Access denied" });
+        }
 
 
 
+        if (role !== "admin") {
+          return res.status(403).send({ message: "Admin access only" });
+        }
 
+        const startDate = getPastDate(180); // last 6 months
+
+        const dailyStats = await BorrowCollection.aggregate([
+          {
+            $match: {
+              borrowDate: { $gte: startDate },
+            },
+          },
+          {
+            $group: {
+              _id: {
+                $dateToString: { format: "%Y-%m-%d", date: "$borrowDate" },
+              },
+              borrowed: { $sum: 1 },
+              returned: {
+                $sum: {
+                  $cond: [{ $eq: ["$status", "returned"] }, 1, 0],
+                },
+              },
+            },
+          },
+          { $sort: { _id: 1 } },
+        ]).toArray();
+
+        // Fill dates
+        const labels = [];
+        const borrowed = [];
+        const returned = [];
+
+        for (
+          let d = new Date(startDate);
+          d <= new Date();
+          d.setDate(d.getDate() + 1)
+        ) {
+          const dateStr = d.toISOString().slice(0, 10);
+          labels.push(dateStr);
+          const day = dailyStats.find((s) => s._id === dateStr) || {
+            borrowed: 0,
+            returned: 0,
+          };
+          borrowed.push(day.borrowed);
+          returned.push(day.returned);
+        }
+
+        // Additional admin summary
+        const totalBooks = await BookCollection.countDocuments({});
+        const availableBooks = await BookCollection.countDocuments({
+          status: "available",
+        });
+        const totalBorrowsEver = await BorrowCollection.countDocuments({});
+        const activeBorrows = await BorrowCollection.countDocuments({
+          status: "borrowed",
+        });
+
+        res.send({
+          success: true,
+          chartData: {
+            labels,
+            datasets: [
+              {
+                label: "Daily Borrows",
+                data: borrowed,
+                borderColor: "rgb(239, 68, 68)",
+                backgroundColor: "rgba(239, 68, 68, 0.1)",
+              },
+              {
+                label: "Daily Returns",
+                data: returned,
+                borderColor: "rgb(34, 197, 94)",
+                backgroundColor: "rgba(34, 197, 94, 0.1)",
+              },
+            ],
+          },
+          summary: {
+            totalBooks,
+            availableBooks,
+            booksOnLoan: totalBooks - availableBooks,
+            activeBorrows,
+            totalBorrowsEver,
+            borrowsLast30Days: borrowed.slice(-30).reduce((a, b) => a + b, 0),
+          },
+        });
+      } catch (error) {
+        console.error(error);
+        res.status(500).send({ message: "Failed to load admin dashboard" });
+      }
+    });
 
     await client.db("admin").command({ ping: 1 });
     console.log(
