@@ -250,6 +250,43 @@ async function run() {
 
     // books collections
 
+
+// GET /books/categories - Get all available book categories
+app.get("/books/categories", async (req, res) => {
+  try {
+    // Fetch only available books based on 'status'
+    const availableBooks = await BookCollection.find({ status: "available" }).toArray();
+
+    if (!Array.isArray(availableBooks)) {
+      return res.status(500).send({
+        success: false,
+        message: "Data format error",
+      });
+    }
+
+    // Extract unique categories, filter out empty/null
+    const categories = [
+      ...new Set(
+        availableBooks
+          .map((book) => book.category)
+          .filter((cat) => cat && cat.trim() !== "")
+      ),
+    ];
+
+    res.status(200).send({
+      success: true,
+      categories,
+    });
+  } catch (error) {
+    res.status(500).send({
+      success: false,
+      message: error.message,
+    });
+  }
+});
+
+
+
     app.post("/books", verifyToken, async (req, res) => {
       try {
         const {
@@ -324,7 +361,7 @@ async function run() {
           pageSize = 8,
           search = "",
           category = "",
-          availability = "",
+          availability = "available",
           sort = "",
         } = req.query;
 
@@ -381,6 +418,7 @@ async function run() {
         });
       }
     });
+
     app.put("/books/:id", verifyToken, async (req, res) => {
       try {
         const updateData = req.body;
@@ -431,90 +469,106 @@ async function run() {
       }
     });
 
-    // borrow and return
+    //=========================== borrow and return =========================
+
+
+
     app.post("/books/borrow/:id", verifyToken, async (req, res) => {
-      try {
-        const bookId = new ObjectId(req.params.id);
-        const { email: userEmail, role } = req.user;
+  try {
+    const bookId = new ObjectId(req.params.id);
+    const { email: userEmail, role } = req.user;
 
-        /* -------- Borrow Limit by Role -------- */
-        const borrowLimits = {
-          member: 3,
-          teacher: 5,
-          admin: Infinity,
-        };
+    /* -------- Borrow Limit by Role -------- */
+    const borrowLimits = {
+      member: 3,
+      teacher: 5,
+      admin: Infinity,
+    };
+    const borrowDays = {
+      member: 7,
+      teacher: 15,
+      admin: 30,
+    };
 
-        const maxAllowed = borrowLimits[role] ?? 3;
+    const maxAllowed = borrowLimits[role] ?? 3;
+    const allowedDays = borrowDays[role] ?? 14;
 
-        // Count active borrows
-        const activeBorrows = await BorrowCollection.countDocuments({
-          userEmail,
-          status: "borrowed",
-        });
-
-        if (activeBorrows >= maxAllowed) {
-          return res.status(403).send({
-            success: false,
-            message: `Borrow limit reached (${maxAllowed} books)`,
-          });
-        }
-
-        /* -------- Check Book -------- */
-        const book = await BookCollection.findOne({ _id: bookId });
-
-        if (!book) {
-          return res.status(404).send({ message: "Book not found" });
-        }
-
-        if (book.availableCopies <= 0) {
-          return res.status(400).send({ message: "No copies available" });
-        }
-
-        /* -------- Prevent Double Borrow -------- */
-        const alreadyBorrowed = await BorrowCollection.findOne({
-          bookId,
-          userEmail,
-          status: "borrowed",
-        });
-
-        if (alreadyBorrowed) {
-          return res.status(400).send({
-            message: "You already borrowed this book",
-          });
-        }
-
-        /* -------- Borrow Book -------- */
-        await BorrowCollection.insertOne({
-          bookId,
-          userEmail,
-          borrowDate: new Date(),
-          returnDate: null,
-          status: "borrowed",
-        });
-
-        const updatedAvailable = book.availableCopies - 1;
-
-        await BookCollection.updateOne(
-          { _id: bookId },
-          {
-            $set: {
-              availableCopies: updatedAvailable,
-              status: updatedAvailable === 0 ? "unavailable" : "available",
-            },
-          }
-        );
-
-        res.send({
-          success: true,
-          message: "Book borrowed successfully",
-        });
-      } catch (error) {
-        res.status(500).send({
-          success: false,
-          message: "Borrow failed",
-        });
-      }
+    // Count active borrows
+    const activeBorrows = await BorrowCollection.countDocuments({
+      userEmail,
+      status: "borrowed",
     });
+
+    if (activeBorrows >= maxAllowed) {
+      return res.status(403).send({
+        success: false,
+        message: `Borrow limit reached (${maxAllowed} books)`,
+      });
+    }
+
+    /* -------- Check Book -------- */
+    const book = await BookCollection.findOne({ _id: bookId });
+    if (!book) {
+      return res.status(404).send({ message: "Book not found" });
+    }
+    if (book.availableCopies <= 0) {
+      return res.status(400).send({ message: "No copies available" });
+    }
+
+    /* -------- Prevent Double Borrow -------- */
+    const alreadyBorrowed = await BorrowCollection.findOne({
+      bookId,
+      userEmail,
+      status: "borrowed",
+    });
+    if (alreadyBorrowed) {
+      return res.status(400).send({
+        message: "You already borrowed this book",
+      });
+    }
+
+    /* -------- Calculate Return Date -------- */
+    const borrowDate = new Date();
+    const returnDate = new Date();
+    returnDate.setDate(borrowDate.getDate() + allowedDays);
+
+    /* -------- Borrow Book -------- */
+    await BorrowCollection.insertOne({
+      bookId,
+      userEmail,
+      borrowDate,
+      returnDate,
+      status: "borrowed",
+    });
+
+    const updatedAvailable = book.availableCopies - 1;
+
+    await BookCollection.updateOne(
+      { _id: bookId },
+      {
+        $set: {
+          availableCopies: updatedAvailable,
+          status: updatedAvailable === 0 ? "unavailable" : "available",
+        },
+      }
+    );
+
+    res.send({
+      success: true,
+      message: "Book borrowed successfully",
+      data: {
+        borrowDate,
+        returnDate,
+      },
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).send({
+      success: false,
+      message: "Borrow failed",
+    });
+  }
+});
 
     app.post("/books/return/:id", verifyToken, async (req, res) => {
       try {
@@ -622,6 +676,11 @@ async function run() {
         res.status(500).send({ message: "Failed to load history" });
       }
     });
+
+
+
+
+
 
     await client.db("admin").command({ ping: 1 });
     console.log(
