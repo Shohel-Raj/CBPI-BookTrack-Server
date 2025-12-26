@@ -62,6 +62,7 @@ async function run() {
     const UserCollection = database.collection("UserCollection");
     const BookCollection = database.collection("BookCollection");
     const BorrowCollection = database.collection("BorrowCollection");
+    const ContuctMassage = database.collection("ContactMassage");
 
     app.get("/", (req, res) => {
       res.send(" CPBI library Management server is coocking.............");
@@ -473,12 +474,18 @@ async function run() {
     app.post("/books/borrow/:id", verifyToken, async (req, res) => {
       try {
         const bookId = new ObjectId(req.params.id);
-        const { email: userEmail, role } = req.user;
+        const userEmail = req.user.email;
+        if (!userEmail) {
+          return res.status(401).send({ message: "Unauthorized" });
+        }
+
+        const userDoc = await UserCollection.findOne({ email: userEmail });
+        const role = userDoc?.role;
 
         /* -------- Borrow Limit by Role -------- */
         const borrowLimits = {
           member: 3,
-          teacher: 5,
+          teacher: 14,
           admin: Infinity,
         };
         const borrowDays = {
@@ -591,6 +598,7 @@ async function run() {
           {
             $set: {
               status: "returned",
+
               returnDate: new Date(),
             },
           }
@@ -684,7 +692,6 @@ async function run() {
       date.setUTCDate(date.getUTCDate() - (days - 1));
       return date;
     };
-
 
     // 1. Member Dashboard - Personal borrow history (last 30 days)
     app.get("/dashboard/member", verifyToken, async (req, res) => {
@@ -909,12 +916,10 @@ async function run() {
           return res.status(401).send({ message: "Unauthorized" });
 
         const userDoc = await UserCollection.findOne({ email: userEmail });
-        const role =userDoc?.role;
+        const role = userDoc?.role;
         if (!userDoc || userDoc.role !== "admin") {
           return res.status(403).send({ message: "Access denied" });
         }
-
-
 
         if (role !== "admin") {
           return res.status(403).send({ message: "Admin access only" });
@@ -1005,6 +1010,34 @@ async function run() {
       } catch (error) {
         console.error(error);
         res.status(500).send({ message: "Failed to load admin dashboard" });
+      }
+    });
+
+    app.post("/api/contact", async (req, res) => {
+      try {
+        const { name, email, subject, message } = req.body;
+
+        if (!name || !email || !subject || !message) {
+          return res.status(400).json({ message: "All fields are required" });
+        }
+
+        const newMessage = {
+          name,
+          email,
+          subject,
+          message,
+          createdAt: new Date(),
+        };
+
+        // Don't close the client here if using a shared connection
+        const result = await ContuctMassage.insertOne(newMessage);
+
+        res
+          .status(201)
+          .json({ message: "Message saved", id: result.insertedId });
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Failed to save message" });
       }
     });
 
