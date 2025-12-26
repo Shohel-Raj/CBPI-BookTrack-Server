@@ -1013,6 +1013,8 @@ async function run() {
       }
     });
 
+    // =========================== Contuct us===========================
+
     app.post("/api/contact", async (req, res) => {
       try {
         const { name, email, subject, message } = req.body;
@@ -1038,6 +1040,112 @@ async function run() {
       } catch (err) {
         console.error(err);
         res.status(500).json({ message: "Failed to save message" });
+      }
+    });
+
+    app.get("/api/contact", verifyToken, async (req, res) => {
+      try {
+        const userEmail = req.user.email;
+        if (!userEmail)
+          return res.status(401).send({ message: "Unauthorized" });
+
+        const userDoc = await UserCollection.findOne({ email: userEmail });
+        const role = userDoc?.role;
+        if (!userDoc || userDoc.role !== "admin") {
+          return res.status(403).send({ message: "Access denied" });
+        }
+
+        if (role !== "admin") {
+          return res.status(403).send({ message: "Admin access only" });
+        }
+        const messages = await ContuctMassage.find({})
+          .sort({ createdAt: -1 }) // latest messages first
+          .toArray();
+
+        res.status(200).json(messages);
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Failed to fetch messages" });
+      }
+    });
+
+    app.delete("/api/contact", verifyToken, async (req, res) => {
+      try {
+        const userEmail = req.user.email;
+        if (!userEmail)
+          return res.status(401).send({ message: "Unauthorized" });
+
+        const userDoc = await UserCollection.findOne({ email: userEmail });
+        const role = userDoc?.role;
+        if (!userDoc || userDoc.role !== "admin") {
+          return res.status(403).send({ message: "Access denied" });
+        }
+
+        if (role !== "admin") {
+          return res.status(403).send({ message: "Admin access only" });
+        }
+        const result = await ContuctMassage.deleteMany({});
+        res.status(200).json({
+          message: `Deleted ${result.deletedCount} messages successfully`,
+        });
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Failed to delete messages" });
+      }
+    });
+
+    // -------------------------- FRONT PAGE BOOKS --------------------------
+
+    // GET /books/featured - 4 latest books
+    app.get("/featured", async (req, res) => {
+      try {
+        const books = await BookCollection.find({ status: "available" })
+          .sort({ createdAt: -1 })
+          .limit(4)
+          .toArray();
+
+        res.status(200).send({ books });
+      } catch (err) {
+        console.error("Featured Books Error:", err);
+        res.status(500).send({ books: [], message: "Failed to fetch book" });
+      }
+    });
+
+    // GET /books/top-borrowed - top 4 borrowed books
+    app.get("/top-borrowed", async (req, res) => {
+      try {
+        // Aggregate top borrowed books
+        const borrowedAgg = await BorrowCollection.aggregate([
+          { $match: { status: "borrowed" } },
+          { $group: { _id: "$bookId", borrowCount: { $sum: 1 } } },
+          { $sort: { borrowCount: -1 } },
+          { $limit: 4 },
+        ]).toArray();
+
+        // Extract bookIds
+        const topBorrowedIds = borrowedAgg.map((b) => b._id);
+
+        // Fetch books from BookCollection
+        let topBooks = await BookCollection.find({
+          _id: { $in: topBorrowedIds },
+        }).toArray();
+
+        // If less than 4, fill with latest books from BookCollection
+        if (topBooks.length < 4) {
+          const remaining = 4 - topBooks.length;
+          const additionalBooks = await BookCollection.find({
+            _id: { $nin: topBorrowedIds },
+          })
+            .sort({ createdAt: -1 })
+            .limit(remaining)
+            .toArray();
+          topBooks = topBooks.concat(additionalBooks);
+        }
+
+        res.status(200).send({ success: true, books: topBooks });
+      } catch (error) {
+        console.error(error);
+        res.status(500).send({ success: false, books: [] });
       }
     });
 
