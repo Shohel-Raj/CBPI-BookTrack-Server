@@ -63,6 +63,7 @@ async function run() {
     const BookCollection = database.collection("BookCollection");
     const BorrowCollection = database.collection("BorrowCollection");
     const ContuctMassage = database.collection("ContactMassage");
+    const CarouselCollection = database.collection("CarouselCollection");
 
     app.get("/", (req, res) => {
       res.send(" CPBI library Management server is coocking.............");
@@ -1146,6 +1147,107 @@ async function run() {
       } catch (error) {
         console.error(error);
         res.status(500).send({ success: false, books: [] });
+      }
+    });
+
+    app.post("/carousel", verifyToken, async (req, res) => {
+      try {
+        const { img, text } = req.body;
+
+        if (!img || !text) {
+          return res.status(400).send({
+            success: false,
+            message: "Image and text are required",
+          });
+        }
+
+        const newItem = {
+          img,
+          text,
+          createdAt: new Date(),
+        };
+
+        const result = await CarouselCollection.insertOne(newItem);
+
+        res.status(201).send({
+          success: true,
+          item: { _id: result.insertedId, ...newItem },
+        });
+      } catch (error) {
+        res.status(500).send({
+          success: false,
+          message: "Failed to add carousel item",
+        });
+      }
+    });
+
+    app.get("/carousel", async (req, res) => {
+      try {
+        const items = await CarouselCollection.find({})
+          .sort({ createdAt: -1 })
+          .toArray();
+
+        res.send(items);
+      } catch (error) {
+        res.status(500).send([]);
+      }
+    });
+    app.put("/carousel/:id", verifyToken, async (req, res) => {
+      try {
+        const { img, text } = req.body;
+
+        const result = await CarouselCollection.updateOne(
+          { _id: new ObjectId(req.params.id) },
+          {
+            $set: {
+              img,
+              text,
+              updatedAt: new Date(),
+            },
+          }
+        );
+
+        if (result.matchedCount === 0) {
+          return res.status(404).send({
+            success: false,
+            message: "Carousel item not found",
+          });
+        }
+
+        res.send({
+          success: true,
+          message: "Carousel item updated",
+        });
+      } catch (error) {
+        res.status(500).send({
+          success: false,
+          message: "Failed to update carousel item",
+        });
+      }
+    });
+
+    app.delete("/carousel/:id", verifyToken, async (req, res) => {
+      try {
+        const result = await CarouselCollection.deleteOne({
+          _id: new ObjectId(req.params.id),
+        });
+
+        if (result.deletedCount === 0) {
+          return res.status(404).send({
+            success: false,
+            message: "Carousel item not found",
+          });
+        }
+
+        res.send({
+          success: true,
+          message: "Carousel item deleted",
+        });
+      } catch (error) {
+        res.status(500).send({
+          success: false,
+          message: "Failed to delete carousel item",
+        });
       }
     });
 
