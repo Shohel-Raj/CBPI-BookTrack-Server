@@ -6,11 +6,11 @@ const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 
 const app = express();
 const port = process.env.PORT || 3000;
-// const firebaseKey=Buffer.from(process.env.FIREBASEJDK,'base64').toString('utf8')
+const firebaseKey=Buffer.from(process.env.FIREBASEJDK,'base64').toString('utf8')
 
-// const serviceAccount = JSON.parse(firebaseKey);
+const serviceAccount = JSON.parse(firebaseKey);
 
-const serviceAccount = require("./firebaseAdminJdk.json");
+// const serviceAccount = require("./firebaseAdminJdk.json");r
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
@@ -18,13 +18,12 @@ admin.initializeApp({
 
 app.use(
   cors({
-    origin: ["http://localhost:5173"],
+    origin: ["http://localhost:5173","https://cbpi-booktrack.web.app"],
     credentials: true,
   })
 );
 
 app.use(express.json());
-// const uri= `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASSWORD}@cluster0.pcdcucf.mongodb.net/?appName=Cluster0`
 
 const client = new MongoClient(process.env.DB_URI, {
   serverApi: {
@@ -472,164 +471,337 @@ async function run() {
 
     //=========================== borrow and return =========================
 
-    app.post("/books/borrow/:id", verifyToken, async (req, res) => {
-      try {
-        const bookId = new ObjectId(req.params.id);
-        const userEmail = req.user.email;
-        if (!userEmail) {
-          return res.status(401).send({ message: "Unauthorized" });
-        }
+// User requests to borrow a book
+app.post("/books/borrow/:id", verifyToken, async (req, res) => {
+  try {
+    const bookId = new ObjectId(req.params.id);
+    const userEmail = req.user.email;
 
-        const userDoc = await UserCollection.findOne({ email: userEmail });
-        const role = userDoc?.role;
+    const userDoc = await UserCollection.findOne({ email: userEmail });
+    const role = userDoc?.role;
 
-        /* -------- Borrow Limit by Role -------- */
-        const borrowLimits = {
-          member: 3,
-          teacher: 14,
-          admin: Infinity,
-        };
-        const borrowDays = {
-          member: 7,
-          teacher: 15,
-          admin: 30,
-        };
+    // Borrow limits
+    const borrowLimits = { member: 3, teacher: 14, admin: Infinity };
+    const borrowDays = { member: 7, teacher: 15, admin: 30 };
 
-        const maxAllowed = borrowLimits[role] ?? 3;
-        const allowedDays = borrowDays[role] ?? 14;
+    const maxAllowed = borrowLimits[role] ?? 3;
+    const allowedDays = borrowDays[role] ?? 14;
 
-        // Count active borrows
-        const activeBorrows = await BorrowCollection.countDocuments({
-          userEmail,
-          status: "borrowed",
-        });
-
-        if (activeBorrows >= maxAllowed) {
-          return res.status(403).send({
-            success: false,
-            message: `Borrow limit reached (${maxAllowed} books)`,
-          });
-        }
-
-        /* -------- Check Book -------- */
-        const book = await BookCollection.findOne({ _id: bookId });
-        if (!book) {
-          return res.status(404).send({ message: "Book not found" });
-        }
-        if (book.availableCopies <= 0) {
-          return res.status(400).send({ message: "No copies available" });
-        }
-
-        /* -------- Prevent Double Borrow -------- */
-        const alreadyBorrowed = await BorrowCollection.findOne({
-          bookId,
-          userEmail,
-          status: "borrowed",
-        });
-        if (alreadyBorrowed) {
-          return res.status(400).send({
-            message: "You already borrowed this book",
-          });
-        }
-
-        /* -------- Calculate Return Date -------- */
-        const borrowDate = new Date();
-        const returnDate = new Date();
-        returnDate.setDate(borrowDate.getDate() + allowedDays);
-
-        /* -------- Borrow Book -------- */
-        await BorrowCollection.insertOne({
-          bookId,
-          userEmail,
-          borrowDate,
-          returnDate,
-          status: "borrowed",
-        });
-
-        const updatedAvailable = book.availableCopies - 1;
-
-        await BookCollection.updateOne(
-          { _id: bookId },
-          {
-            $set: {
-              availableCopies: updatedAvailable,
-              status: updatedAvailable === 0 ? "unavailable" : "available",
-            },
-          }
-        );
-
-        res.send({
-          success: true,
-          message: "Book borrowed successfully",
-          data: {
-            borrowDate,
-            returnDate,
-          },
-        });
-      } catch (error) {
-        console.error(error);
-        res.status(500).send({
-          success: false,
-          message: "Borrow failed",
-        });
-      }
+    const activeBorrows = await BorrowCollection.countDocuments({
+      userEmail,
+      status: "borrowed",
     });
 
-    app.post("/books/return/:id", verifyToken, async (req, res) => {
-      try {
-        const bookId = new ObjectId(req.params.id);
-        const userEmail = req.user.email;
+    if (activeBorrows >= maxAllowed) {
+      return res.status(403).send({
+        success: false,
+        message: `Borrow limit reached (${maxAllowed} books)`,
+      });
+    }
 
-        // 🔎 Find borrow record
-        const borrowRecord = await BorrowCollection.findOne({
-          bookId,
-          userEmail,
-          status: "borrowed",
-        });
+    const book = await BookCollection.findOne({ _id: bookId });
+    if (!book || book.availableCopies <= 0) {
+      return res.status(400).send({ message: "Book not available" });
+    }
 
-        if (!borrowRecord) {
-          return res.status(400).send({
-            message: "You did not borrow this book",
-          });
+    const borrowDate = new Date();
+    const returnDate = new Date();
+    returnDate.setDate(borrowDate.getDate() + allowedDays);
+
+    // Insert as pending
+    await BorrowCollection.insertOne({
+      bookId,
+      userEmail,
+      borrowDate,
+      returnDate,
+      status: "pending-borrow", // Pending borrow
+    });
+
+    res.send({
+      success: true,
+      message: "Borrow request sent. Waiting for admin confirmation.",
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).send({ success: false, message: "Borrow request failed" });
+  }
+});
+
+// User requests to return a book
+app.post("/books/return/:id", verifyToken, async (req, res) => {
+  try {
+    const bookId = new ObjectId(req.params.id);
+    const userEmail = req.user.email;
+
+    const borrowRecord = await BorrowCollection.findOne({
+      bookId,
+      userEmail,
+      status: "borrowed",
+    });
+
+    if (!borrowRecord) {
+      return res.status(400).send({
+        success: false,
+        message: "You did not borrow this book",
+      });
+    }
+
+    // Update status to pending-return
+    await BorrowCollection.updateOne(
+      { _id: borrowRecord._id },
+      { $set: { status: "pending-return", requestDate: new Date() } }
+    );
+
+    res.send({
+      success: true,
+      message: "Return request sent. Waiting for admin confirmation.",
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).send({ success: false, message: "Return request failed" });
+  }
+});
+// Get all pending borrow/return requests
+app.get("/admin/pending-requests", verifyToken, async (req, res) => {
+  try {
+    const userEmail = req.user.email;
+    const adminDoc = await UserCollection.findOne({ email: userEmail });
+
+    if (!adminDoc || adminDoc.role !== "admin") {
+      return res.status(403).send({ message: "Admin access only" });
+    }
+
+    const pendingRequests = await BorrowCollection.aggregate([
+      { $match: { status: { $in: ["pending-borrow", "pending-return"] } } },
+      {
+        $lookup: {
+          from: "BookCollection",
+          localField: "bookId",
+          foreignField: "_id",
+          as: "book",
+        },
+      },
+      { $unwind: "$book" },
+    ]).toArray();
+
+    res.send({ success: true, pendingRequests });
+  } catch (error) {
+    console.error(error);
+    res.status(500).send({ success: false, message: "Failed to fetch requests" });
+  }
+});
+app.post("/admin/confirm-borrow/:id", verifyToken, async (req, res) => {
+  try {
+    const userEmail = req.user.email;
+    const adminDoc = await UserCollection.findOne({ email: userEmail });
+
+    if (!adminDoc || adminDoc.role !== "admin") {
+      return res.status(403).send({ message: "Admin access only" });
+    }
+
+    const borrowId = new ObjectId(req.params.id);
+    const borrowRecord = await BorrowCollection.findOne({ _id: borrowId });
+
+    if (!borrowRecord || borrowRecord.status !== "pending-borrow") {
+      return res.status(400).send({ message: "Invalid borrow request" });
+    }
+
+    const book = await BookCollection.findOne({ _id: borrowRecord.bookId });
+    if (!book || book.availableCopies <= 0) {
+      return res.status(400).send({ message: "Book not available" });
+    }
+
+    const updatedAvailable = book.availableCopies - 1;
+
+    await BookCollection.updateOne(
+      { _id: book._id },
+      {
+        $set: {
+          availableCopies: updatedAvailable,
+          status: updatedAvailable === 0 ? "unavailable" : "available",
+        },
+      }
+    );
+
+    await BorrowCollection.updateOne(
+      { _id: borrowId },
+      { $set: { status: "borrowed", borrowConfirmedAt: new Date() } }
+    );
+
+    res.send({ success: true, message: "Borrow request confirmed" });
+  } catch (error) {
+    console.error(error);
+    res.status(500).send({ success: false, message: "Failed to confirm borrow" });
+  }
+});
+app.post("/admin/confirm-return/:id", verifyToken, async (req, res) => {
+  try {
+    const userEmail = req.user.email;
+    const adminDoc = await UserCollection.findOne({ email: userEmail });
+
+    if (!adminDoc || adminDoc.role !== "admin") {
+      return res.status(403).send({ message: "Admin access only" });
+    }
+
+    const borrowId = new ObjectId(req.params.id);
+    const borrowRecord = await BorrowCollection.findOne({ _id: borrowId });
+
+    if (!borrowRecord || borrowRecord.status !== "pending-return") {
+      return res.status(400).send({ message: "Invalid return request" });
+    }
+
+    const book = await BookCollection.findOne({ _id: borrowRecord.bookId });
+    const updatedAvailable = book.availableCopies + 1;
+
+    await BookCollection.updateOne(
+      { _id: book._id },
+      { $set: { availableCopies: updatedAvailable, status: "available" } }
+    );
+
+    await BorrowCollection.updateOne(
+      { _id: borrowId },
+      { $set: { status: "returned", returnConfirmedAt: new Date() } }
+    );
+
+    res.send({ success: true, message: "Return request confirmed" });
+  } catch (error) {
+    console.error(error);
+    res.status(500).send({ success: false, message: "Failed to confirm return" });
+  }
+});
+app.get("/books/status/:id", verifyToken, async (req, res) => {
+  try {
+    const bookId = new ObjectId(req.params.id);
+    const userEmail = req.user.email;
+
+    // Find borrow record for this user & book
+    const borrowRecord = await BorrowCollection.findOne({
+      bookId,
+      userEmail,
+    });
+
+    if (!borrowRecord) {
+      return res.send({
+        success: true,
+        status: "not-borrowed",
+        message: "You have not borrowed or requested this book",
+      });
+    }
+
+    let statusMessage = "";
+    switch (borrowRecord.status) {
+      case "pending-borrow":
+        statusMessage = "Borrow request pending";
+        break;
+      case "borrowed":
+        statusMessage = "Book currently borrowed";
+        break;
+      case "pending-return":
+        statusMessage = "Return request pending";
+        break;
+      case "returned":
+        statusMessage = "Book returned";
+        break;
+      default:
+        statusMessage = borrowRecord.status;
+    }
+
+    res.send({
+      success: true,
+      status: borrowRecord.status,
+      message: statusMessage,
+      borrowDate: borrowRecord.borrowDate,
+      returnDate: borrowRecord.returnDate,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).send({
+      success: false,
+      message: "Failed to get book status",
+    });
+  }
+});
+// =========================== ADMIN PENDING BORROW/RETURN REQUESTS ===========================
+
+app.get("/admin/borrows/pending", verifyToken, async (req, res) => {
+  try {
+    const userEmail = req.user.email;
+    const adminDoc = await UserCollection.findOne({ email: userEmail });
+
+    if (!adminDoc || adminDoc.role !== "admin") {
+      return res.status(403).send({ success: false, message: "Admin access only" });
+    }
+
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
+
+    // Only fetch pending borrow and pending return
+    const pipeline = [
+      {
+        $match: {
+          status: { $in: ["pending-borrow", "pending-return"] }
         }
+      },
+      {
+        $lookup: {
+          from: "BookCollection",
+          localField: "bookId",
+          foreignField: "_id",
+          as: "book"
+        }
+      },
+      { $unwind: { path: "$book", preserveNullAndEmptyArrays: true } },
+      {
+        $lookup: {
+          from: "UserCollection",
+          localField: "userEmail",
+          foreignField: "email",
+          as: "user"
+        }
+      },
+      { $unwind: { path: "$user", preserveNullAndEmptyArrays: true } },
+      {
+        $project: {
+          _id: 1,
+          status: 1,
+          borrowDate: 1,
+          returnDate: 1,
+          book: { title: 1, author: 1 },
+          user: { name: 1, email: 1 }
+        }
+      },
+      { $sort: { borrowDate: -1 } }, // newest requests first
+      { $skip: skip },
+      { $limit: limit }
+    ];
 
-        // 🔁 Update borrow record
-        await BorrowCollection.updateOne(
-          { _id: borrowRecord._id },
-          {
-            $set: {
-              status: "returned",
+    const data = await BorrowCollection.aggregate(pipeline).toArray();
 
-              returnDate: new Date(),
-            },
-          }
-        );
+    const totalPending = await BorrowCollection.countDocuments({
+      status: { $in: ["pending-borrow", "pending-return"] }
+    });
+    const totalPages = Math.ceil(totalPending / limit);
 
-        // 📈 Update book
-        const book = await BookCollection.findOne({ _id: bookId });
-        const updatedAvailable = book.availableCopies + 1;
-
-        await BookCollection.updateOne(
-          { _id: bookId },
-          {
-            $set: {
-              availableCopies: updatedAvailable,
-              status: "available",
-            },
-          }
-        );
-
-        res.send({
-          success: true,
-          message: "Book returned successfully",
-        });
-      } catch (error) {
-        res.status(500).send({
-          success: false,
-          message: "Return failed",
-        });
+    res.send({
+      success: true,
+      data,
+      pagination: {
+        page,
+        totalPages,
+        totalPending,
+        limit
       }
     });
+  } catch (error) {
+    console.error("Pending Requests Error:", error);
+    res.status(500).send({
+      success: false,
+      message: "Failed to fetch pending requests"
+    });
+  }
+});
+
 
     app.get("/my-borrowed-books", verifyToken, async (req, res) => {
       try {
@@ -683,6 +855,96 @@ async function run() {
       }
     });
 
+// =========================== ADMIN BORROW HISTORY ===========================
+
+app.get("/admin/borrows", verifyToken, async (req, res) => {
+  try {
+    const userEmail = req.user.email;
+    const adminDoc = await UserCollection.findOne({ email: userEmail });
+
+    // Only allow admins
+    if (!adminDoc || adminDoc.role !== "admin") {
+      return res.status(403).send({ success: false, message: "Admin access only" });
+    }
+
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 12;
+    const sortOrder = req.query.order === "desc" ? -1 : 1; // asc = 1, desc = -1
+    const skip = (page - 1) * limit;
+
+    // Build sort object (primarily by status, then by borrowDate descending)
+    let sort = { status: sortOrder, borrowDate: -1 };
+
+    // Aggregation pipeline to join book and user info
+    const pipeline = [
+      {
+        $lookup: {
+          from: "BookCollection",
+          localField: "bookId",
+          foreignField: "_id",
+          as: "book",
+        },
+      },
+      { $unwind: { path: "$book", preserveNullAndEmptyArrays: true } },
+
+      {
+        $lookup: {
+          from: "UserCollection",
+          localField: "userEmail",
+          foreignField: "email",
+          as: "user",
+        },
+      },
+      { $unwind: { path: "$user", preserveNullAndEmptyArrays: true } },
+
+      // Project only needed fields
+      {
+        $project: {
+          _id: 1,
+          status: 1,
+          borrowDate: 1,
+          returnDate: 1,
+          book: {
+            title: 1,
+            author: 1,
+          },
+          user: {
+            name: 1,
+            email: 1,
+          },
+        },
+      },
+
+      { $sort: sort },
+      { $skip: skip },
+      { $limit: limit },
+    ];
+
+    // Run aggregation
+    const data = await BorrowCollection.aggregate(pipeline).toArray();
+
+    // Get total count for pagination
+    const totalBorrows = await BorrowCollection.countDocuments({});
+    const totalPages = Math.ceil(totalBorrows / limit);
+
+    res.send({
+      success: true,
+      data,
+      pagination: {
+        page,
+        totalPages,
+        totalBorrows,
+        limit,
+      },
+    });
+  } catch (error) {
+    console.error("Admin Borrows History Error:", error);
+    res.status(500).send({
+      success: false,
+      message: "Failed to fetch borrow history",
+    });
+  }
+});
     // =========================== DASHBOARD STATS ===========================
 
     const getPastDate = (days) => {
@@ -909,110 +1171,121 @@ async function run() {
         res.status(500).send({ message: "Failed to load dashboard" });
       }
     });
-    // 3. Admin Dashboard - Library-wide stats (last 6 months)
-    app.get("/dashboard/admin", verifyToken, async (req, res) => {
-      try {
-        const userEmail = req.user.email;
-        if (!userEmail)
-          return res.status(401).send({ message: "Unauthorized" });
+   // 3. Admin Dashboard - Library-wide stats (last 6 months)
+app.get("/dashboard/admin", verifyToken, async (req, res) => {
+  try {
+    const userEmail = req.user.email;
+    if (!userEmail)
+      return res.status(401).send({ message: "Unauthorized" });
 
-        const userDoc = await UserCollection.findOne({ email: userEmail });
-        const role = userDoc?.role;
-        if (!userDoc || userDoc.role !== "admin") {
-          return res.status(403).send({ message: "Access denied" });
-        }
+    const userDoc = await UserCollection.findOne({ email: userEmail });
+    if (!userDoc || userDoc.role !== "admin") {
+      return res.status(403).send({ message: "Admin access only" });
+    }
 
-        if (role !== "admin") {
-          return res.status(403).send({ message: "Admin access only" });
-        }
+    const startDate = getPastDate(180); // last 6 months
 
-        const startDate = getPastDate(180); // last 6 months
+    const dailyStats = await BorrowCollection.aggregate([
+      {
+        $match: { borrowDate: { $gte: startDate } },
+      },
+      {
+        $group: {
+          _id: { $dateToString: { format: "%Y-%m-%d", date: "$borrowDate" } },
+          borrowed: {
+            $sum: { $cond: [{ $eq: ["$status", "borrowed"] }, 1, 0] },
+          },
+          pendingBorrows: {
+            $sum: { $cond: [{ $eq: ["$status", "pending-borrow"] }, 1, 0] },
+          },
+          returned: {
+            $sum: { $cond: [{ $eq: ["$status", "returned"] }, 1, 0] },
+          },
+        },
+      },
+      { $sort: { _id: 1 } },
+    ]).toArray();
 
-        const dailyStats = await BorrowCollection.aggregate([
+    // Fill dates for chart
+    const labels = [];
+    const borrowed = [];
+    const returned = [];
+    const pendingBorrows = [];
+
+    for (let d = new Date(startDate); d <= new Date(); d.setDate(d.getDate() + 1)) {
+      const dateStr = d.toISOString().slice(0, 10);
+      labels.push(dateStr);
+
+      const day = dailyStats.find((s) => s._id === dateStr) || {
+        borrowed: 0,
+        pendingBorrows: 0,
+        returned: 0,
+      };
+      borrowed.push(day.borrowed);
+      returned.push(day.returned);
+      pendingBorrows.push(day.pendingBorrows);
+    }
+
+    // Admin summary
+    const totalBooks = await BookCollection.countDocuments({});
+    const availableBooks = await BookCollection.countDocuments({ status: "available" });
+
+    // Sum of total copies of all books
+    const totalCopiesAgg = await BookCollection.aggregate([
+      {
+        $group: {
+          _id: null,
+          totalCopies: { $sum: "$availableCopies" },
+        },
+      },
+    ]).toArray();
+    const totalCopies = totalCopiesAgg[0]?.totalCopies || 0;
+
+    const activeBorrows = await BorrowCollection.countDocuments({ status: "borrowed" });
+    const pendingBorrowRequests = await BorrowCollection.countDocuments({ status: "pending-borrow" });
+    const totalBorrowsEver = await BorrowCollection.countDocuments({});
+
+    res.send({
+      success: true,
+      chartData: {
+        labels,
+        datasets: [
           {
-            $match: {
-              borrowDate: { $gte: startDate },
-            },
+            label: "Daily Borrows",
+            data: borrowed,
+            borderColor: "rgb(239, 68, 68)",
+            backgroundColor: "rgba(239, 68, 68, 0.1)",
           },
           {
-            $group: {
-              _id: {
-                $dateToString: { format: "%Y-%m-%d", date: "$borrowDate" },
-              },
-              borrowed: { $sum: 1 },
-              returned: {
-                $sum: {
-                  $cond: [{ $eq: ["$status", "returned"] }, 1, 0],
-                },
-              },
-            },
+            label: "Daily Returns",
+            data: returned,
+            borderColor: "rgb(34, 197, 94)",
+            backgroundColor: "rgba(34, 197, 94, 0.1)",
           },
-          { $sort: { _id: 1 } },
-        ]).toArray();
-
-        // Fill dates
-        const labels = [];
-        const borrowed = [];
-        const returned = [];
-
-        for (
-          let d = new Date(startDate);
-          d <= new Date();
-          d.setDate(d.getDate() + 1)
-        ) {
-          const dateStr = d.toISOString().slice(0, 10);
-          labels.push(dateStr);
-          const day = dailyStats.find((s) => s._id === dateStr) || {
-            borrowed: 0,
-            returned: 0,
-          };
-          borrowed.push(day.borrowed);
-          returned.push(day.returned);
-        }
-
-        // Additional admin summary
-        const totalBooks = await BookCollection.countDocuments({});
-        const availableBooks = await BookCollection.countDocuments({
-          status: "available",
-        });
-        const totalBorrowsEver = await BorrowCollection.countDocuments({});
-        const activeBorrows = await BorrowCollection.countDocuments({
-          status: "borrowed",
-        });
-
-        res.send({
-          success: true,
-          chartData: {
-            labels,
-            datasets: [
-              {
-                label: "Daily Borrows",
-                data: borrowed,
-                borderColor: "rgb(239, 68, 68)",
-                backgroundColor: "rgba(239, 68, 68, 0.1)",
-              },
-              {
-                label: "Daily Returns",
-                data: returned,
-                borderColor: "rgb(34, 197, 94)",
-                backgroundColor: "rgba(34, 197, 94, 0.1)",
-              },
-            ],
+          {
+            label: "Pending Borrow Requests",
+            data: pendingBorrows,
+            borderColor: "rgb(249, 202, 36)",
+            backgroundColor: "rgba(249, 202, 36, 0.1)",
           },
-          summary: {
-            totalBooks,
-            availableBooks,
-            booksOnLoan: totalBooks - availableBooks,
-            activeBorrows,
-            totalBorrowsEver,
-            borrowsLast30Days: borrowed.slice(-30).reduce((a, b) => a + b, 0),
-          },
-        });
-      } catch (error) {
-        console.error(error);
-        res.status(500).send({ message: "Failed to load admin dashboard" });
-      }
+        ],
+      },
+      summary: {
+        totalBooks,
+        availableBooks,
+        totalCopies,
+        booksOnLoan: totalBooks - availableBooks,
+        activeBorrows,           // only status === "borrowed"
+        pendingBorrowRequests,   // status === "pending-borrow"
+        totalBorrowsEver,
+        borrowsLast30Days: borrowed.slice(-30).reduce((a, b) => a + b, 0),
+      },
     });
+  } catch (error) {
+    console.error(error);
+    res.status(500).send({ message: "Failed to load admin dashboard" });
+  }
+});
 
     // =========================== Contuct us===========================
 
